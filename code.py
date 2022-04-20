@@ -1,22 +1,20 @@
-from typing import Iterator, Literal
+from __future__ import annotations
+from math import inf
+from typing import Iterator, TypeVar
 from graphviz import Digraph
 
 
-Kind = Literal['tree', 'backward', 'forward', 'cross']
+def lines(filename: str) -> Iterator[str]:
+    with open(filename, 'r') as file:
+        for line in file:
+            yield line.strip()
 
-color: dict[Kind, str] = {
-    'tree': 'black',
-    'backward': 'blue',
-    'forward': 'green',
-    'cross': 'red',
-}
 
 class Graph(Digraph):
     def __init__(self, name: str):
         super().__init__(name=name)
         self.label: dict[str, str] = {}
         self.nodes: dict[str, list[str]] = {}
-        self.links: dict[tuple[str, str], Kind | None] = {}
 
     def node(self, name: str, label: str, *, is_root: bool = False):
         if is_root:
@@ -26,10 +24,12 @@ class Graph(Digraph):
         self.label[name] = label
         self.nodes[name] = []
 
-    def edge(self, tail: str, head: str, kind: Kind | None = None):
+    def edge(self, tail: str, head: str):
         self.nodes[tail].append(head)
-        self.links[tail, head] = kind
-        super().edge(tail, head, color=color.get(kind, 'darkgray'))
+        self.nodes[head].append(tail)
+
+    def mark(self, tail: str, head: str):
+        super().edge(tail, head)
 
     def by_label(self, label: str) -> str | None:
         for node, name in self.label.items():
@@ -39,95 +39,69 @@ class Graph(Digraph):
     def render(self, name: str):
         super().render(name, quiet=True, quiet_view=True, view=True)
 
+    @staticmethod
+    def read(nodes: str = 'nodes.csv', links: str = 'links.csv', root: str | None = None) -> Graph:
+        graph = Graph('MO412')
 
-def lines(filename: str) -> Iterator[str]:
-    with open(filename, 'r') as file:
-        for line in file:
-            yield line.strip()
+        for line in lines(nodes):
+            name, value, _, _ = line.split(',')
+            graph.node(value, label=name, is_root=(name == root))
 
+        for line in lines(links):
+            tail, head = line.split(',')
+            graph.edge(tail, head)
 
-def read(nodes: str = 'nodes.csv', links: str = 'links.csv') -> Graph:
-    graph = Graph('MO412')
-
-    for line in lines(nodes):
-        name, value, _, _ = line.split(',')
-        graph.node(value, label=name)
-
-    for line in lines(links):
-        tail, head, _ = line.split(',')
-        graph.edge(tail, head)
-
-    return graph
+        return graph
 
 
-def count(start: int = 0) -> Iterator[int]:
-    while True:
-        yield start
-        start += 1
+class Queue(dict[str, tuple[str, int]]):
+    def pop(self, key: str) -> tuple[str, int]:
+        value = self[key]
+        del self[key]
+        return value
+
+    def popmin(self) -> tuple[str, tuple[str, int]]:
+        key, _ = min(self.items(), key=lambda pair: pair[1][1])
+        return key, self.pop(key)
+
+    def empty(self) -> bool:
+        return len(self) <= 0
+
+    def update(self, key: str, parent: str, distance: int) -> None:
+        _, prev_dist = self.get(key, (None, inf))
+        if distance < prev_dist:
+            self[key] = (parent, distance)
 
 
-def dfs(graph: Graph, initial: str) -> tuple[dict[str, int], dict[str, int], dict[tuple[str, str], Kind]]:
+def bfs(graph: Graph, initial: str) -> tuple[dict[str, int], dict[str, str]]:
     assert initial in graph.nodes
 
-    start: dict[str, int] = {}
-    end: dict[str, int] = {}
-    edges: dict[tuple[str, str], Kind] = {}
+    dist: dict[str, int] = {initial: 0}
+    parent: dict[str, str] = {}
 
-    time = count()
+    queue = Queue({adj: (initial, 1) for adj in graph.nodes[initial]})
+    while not queue.empty():
+        node, (prev, distance) = queue.popmin()
+        graph.mark(prev, node)
+        parent[node], dist[node] = prev, distance
 
-    def dfs_visit(node: str, parent: str | None = None):
-        if node in start:
-            if not parent:
-                return
-            if node not in end:
-                edges[parent, node] = 'forward'
-            elif end[node] < start[parent]:
-                edges[parent, node] = 'cross'
-            else:
-                edges[parent, node] = 'backward'
-            return
-
-        start[node] = next(time)
         for adj in graph.nodes[node]:
-            dfs_visit(adj, parent=node)
-        end[node] = next(time)
+            if adj not in dist:
+                queue.update(adj, node, distance + 1)
 
-        if parent:
-            edges[parent, node] = 'tree'
-
-    dfs_visit(initial)
-    for node in graph.nodes:
-        dfs_visit(node)
-
-    return start, end, edges
-
-
-def colored_graph(graph: Graph, kind: dict[tuple[str, str], Kind], *, start: str | None = None) -> Graph:
-    colored = Graph(graph.name or "Colored")
-
-    for node in graph.nodes:
-        colored.node(node, graph.label[node], is_root=(node == start))
-
-    for tail, head in graph.links:
-        colored.edge(tail, head, kind.get((tail, head)))
-
-    return colored
+    return dist, parent
 
 
 if __name__ == "__main__":
-    graph = read()
-    start, end, edges = dfs(graph, graph.by_label('Ti'))
-
-    graph = colored_graph(graph, edges, start=graph.by_label('Ti'))
+    graph = Graph.read()
+    dist, parent = bfs(graph, graph.by_label('Ti'))
     graph.render('out/graph.gv')
 
-    for pair in graph.links:
-        graph.links[pair] = edges.get(pair)
-
-    with open('out/nodes.csv', 'w') as nodes:
+    with open('turnin/nodes.csv', 'w') as nodes:
         for node in graph.nodes:
-            print(graph.label[node], node, start[node], end[node], sep=',', file=nodes)
+            print(graph.label[node], node, parent.get(node), dist.get(node, inf), sep=',', file=nodes)
 
-    with open('out/links.csv', 'w') as links:
-        for (tail, head), kind in graph.links.items():
-            print(tail, head, kind, sep=',', file=links)
+    with open('turnin/links.csv', 'w') as links:
+        with open('links.csv', 'r') as original:
+            for line in original:
+                links.write(line)
